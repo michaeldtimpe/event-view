@@ -86,3 +86,7 @@ The scripts in `tools/` rebuild them from the Natural Earth GeoJSON files and ne
 - The country map is the coarse 1:110m set, so about twenty very small states have a capital but no land of their own, and a point on a border can resolve to the neighbor.
 - A few seas are filed under the nearer continent for the quiz's continent filter.
 - The page is drawn on a canvas, so the text is not selectable.
+
+## License
+
+The code is under the MIT License; see `LICENSE`. The map data is Natural Earth's and is in the public domain.

@@ -471,7 +471,7 @@ function topBar(nVis) {
 function bottomBar() {
   fill(0, rows - 1, cols, 1, K.bar);
   const s = Q.on ? 'drag turn · wheel zoom · 1–4 answer · enter next · x name it / find it · o region · t theme · q leave the quiz'
-    : 'drag turn · wheel zoom · space ' + (S.spin ? 'hold' : 'spin') + ' · n/p event · f filter · e news · g rivers+ranges · c capitals · s states · t theme · q quiz · ? keys';
+    : 'drag turn · wheel zoom · space ' + (S.sel ? 'release (held on the selected event)' : S.spin ? 'hold' : 'spin') + ' · n/p event · f filter · e news · g rivers+ranges · c capitals · s states · t theme · q quiz · ? keys';
   put(1, rows - 1, cut(s, cols - 2), K.dim);
 }
 function tooltip() {
@@ -489,8 +489,8 @@ function tooltip() {
   fill(x, y, s.length, 1, K.selbg); put(x, y, s, K.bright);
 }
 function helpOverlay() {
-  const L = ['drag            turn the globe', 'wheel  + -      zoom', 'arrows          turn by keys', 'space           hold / resume the slow spin',
-    'n  p            next / previous event (flies there)', 'click           select an event, a marker or a card', 'esc             clear the selection',
+  const L = ['drag            turn the globe', 'wheel  + -      zoom', 'arrows          turn by keys', 'space           hold / resume the slow spin; lets go of a selected event',
+    'n  p            next / previous event (flies there)', 'click           select an event, a marker or a card', 'esc             clear the selection (the globe holds still while one is selected)',
     'f               filter by category', 'e               news on / off (a bare globe when off)',
     'g               draw rivers and mountain ranges', 'c               show capitals', 's               show US states and Canadian provinces', 'C               show their capitals', 'q               geography quiz', '1 2 3           switch design',
     't  T            next / previous color theme', '0               back to the design\'s own theme', '[  ]            smaller / larger text',
@@ -858,7 +858,7 @@ function render() {
 function setDesign(i) { S.design = i; dirty = true; }
 function setTheme(i) { S.theme = i; store.set('theme', i); dirty = true; }
 function nextTheme(dir) { setTheme((THEMES.indexOf(TH) + dir + THEMES.length) % THEMES.length); }
-function zoomBy(f) { S.zoom = clamp(S.zoom * f, 0.6, 7); holdUntil = performance.now() + 4000; dirty = true; }
+function zoomBy(f) { S.zoom = clamp(S.zoom * f, 0.6, 7); holdUntil = performance.now() + HOLD_MS; dirty = true; }
 function select(e) {
   S.sel = e ? e.id : null;
   if (e) S.fly = { lon: e.lon, lat: clamp(e.lat, -65, 65) };
@@ -885,15 +885,24 @@ function hover(ev) {
   canvas.classList.toggle('point', !!h);
   dirty = true;
 }
-canvas.addEventListener('pointerdown', ev => { mouse.down = true; mouse.moved = false; mouse.x = ev.clientX; mouse.y = ev.clientY; mouse.onHit = !!hitAt(Math.floor(ev.clientX / cw), Math.floor(ev.clientY / ch)); canvas.setPointerCapture(ev.pointerId); });
+canvas.addEventListener('pointerdown', ev => {
+  if (ev.button !== 0) return;
+  const h = hitAt(Math.floor(ev.clientX / cw), Math.floor(ev.clientY / ch));
+  mouse.down = true; mouse.moved = false; mouse.x = ev.clientX; mouse.y = ev.clientY;
+  mouse.onHit = !!h && !!h.fn;            // a drag may start on a pin, a label or a card, but not on a button
+  canvas.setPointerCapture(ev.pointerId);
+});
+const release = () => { mouse.down = false; mouse.moved = false; canvas.classList.remove('dragging'); dirty = true; };
+canvas.addEventListener('pointercancel', release);
+window.addEventListener('blur', release);
 canvas.addEventListener('pointermove', ev => {
   if (mouse.down && !mouse.onHit) {
     const dx = ev.clientX - mouse.x, dy = ev.clientY - mouse.y;
-    if (Math.abs(dx) + Math.abs(dy) > 2 || mouse.moved) {
+    if (Math.abs(dx) + Math.abs(dy) > 4 || mouse.moved) {
       mouse.moved = true; canvas.classList.add('dragging');
       const k = DEG / (V.Rr * ch);
       S.lon -= dx * k; S.lat = clamp(S.lat + dy * k, -85, 85); S.fly = null;
-      mouse.x = ev.clientX; mouse.y = ev.clientY; holdUntil = performance.now() + 4000; dirty = true;
+      mouse.x = ev.clientX; mouse.y = ev.clientY; holdUntil = performance.now() + HOLD_MS; dirty = true;
     }
     return;
   }
@@ -921,7 +930,7 @@ window.addEventListener('keydown', ev => {
   else if (k === 'g') S.geo = !S.geo;
   else if (k === 's') { S.states = !S.states; store.set('states', S.states); }
   else if (k === 'C') { S.scaps = !S.scaps; store.set('scaps', S.scaps); }
-  else if (k === ' ') S.spin = !S.spin;
+  else if (k === ' ') { if (S.sel) { select(null); S.spin = true; } else S.spin = !S.spin; holdUntil = 0; }
   else if (k === 'n' || k === 'j') step(1);
   else if (k === 'p' || k === 'k') step(-1);
   else if (k === 'f') { S.filter = S.filter >= CAT_NAMES.length - 1 ? -1 : S.filter + 1; markCountries(); }
@@ -937,7 +946,7 @@ window.addEventListener('keydown', ev => {
   else if (k === '-' || k === '_') zoomBy(1 / 1.25);
   else if (k === '[' || k === ']') { S.fs = clamp(S.fs + (k === ']' ? 1 : -1), 8, 24); store.set('fs', S.fs); resize(); }
   else if (k.startsWith('Arrow')) {
-    const d = 8 / S.zoom; S.fly = null; holdUntil = performance.now() + 4000;
+    const d = 8 / S.zoom; S.fly = null; holdUntil = performance.now() + HOLD_MS;
     if (k === 'ArrowLeft') S.lon -= d; else if (k === 'ArrowRight') S.lon += d;
     else if (k === 'ArrowUp') S.lat = clamp(S.lat + d, -85, 85); else S.lat = clamp(S.lat - d, -85, 85);
   } else used = false;
@@ -1002,6 +1011,7 @@ async function boot() {
 
 // ---------- loop ----------
 let last = performance.now(), lastDraw = 0, holdUntil = 0;
+const HOLD_MS = 1200;                    // how long the spin waits after a drag, zoom or arrow key
 function tick(t) {
   requestAnimationFrame(tick);
   const dt = Math.min(0.1, (t - last) / 1000); last = t;
