@@ -1,0 +1,87 @@
+#!/usr/bin/env zsh
+# event-view — current events and a geography quiz on a text globe, in the browser.
+#
+#   event-view on            start the local server and open the view
+#   event-view off           stop it
+#   event-view               status
+#   event-view focus ID...   mark events as in discussion (the globe flies to the first)
+#   event-view focus         clear the marks
+#   event-view ids [TEXT]    list event ids, optionally only those matching TEXT
+#
+# Serves this folder on 127.0.0.1 only. The page re-reads events.json every
+# 15 seconds, so edits show up without a reload. events.json is yours and is
+# not tracked; the first run copies events.example.json into place.
+
+emulate -L zsh
+setopt pipefail
+
+DIR="${0:A:h}"
+PORT="${EVENT_VIEW_PORT:-8377}"
+STATE="$HOME/.cache/event-view"
+PIDFILE="$STATE/pid"
+URL="http://127.0.0.1:$PORT/"
+
+running() {
+	[[ -f $PIDFILE ]] || return 1
+	local pid=$(<$PIDFILE)
+	[[ -n $pid ]] && kill -0 $pid 2>/dev/null && [[ "$(ps -p $pid -o command= 2>/dev/null)" == *http.server* ]]
+}
+
+case "${1:-status}" in
+on)
+	mkdir -p $STATE
+	[[ -e $DIR/events.json ]] || cp $DIR/events.example.json $DIR/events.json
+	if running; then
+		print "event-view: already on at $URL"
+	else
+		nohup python3 -m http.server $PORT --bind 127.0.0.1 --directory $DIR >$STATE/log 2>&1 &!
+		print $! >$PIDFILE
+		sleep 0.4
+		if ! running; then
+			print -u2 "event-view: the server did not start (is port $PORT taken?). Log: $STATE/log"
+			exit 1
+		fi
+		print "event-view: on at $URL"
+	fi
+	if command -v open >/dev/null; then open "$URL${2:+#$2}"; else xdg-open "$URL${2:+#$2}"; fi
+	;;
+off)
+	if running; then
+		kill $(<$PIDFILE) && print "event-view: off"
+	else
+		print "event-view: was not on"
+	fi
+	/bin/rm -f $PIDFILE
+	;;
+status)
+	if running; then print "event-view: on at $URL"; else print "event-view: off"; fi
+	;;
+focus)
+	shift
+	python3 - $DIR/events.json "$@" <<'PY'
+import json, sys
+path, ids = sys.argv[1], sys.argv[2:]
+d = json.load(open(path))
+known = {e["id"] for e in d["events"]}
+bad = [i for i in ids if i not in known]
+if bad:
+    sys.exit("event-view: no such event id: " + ", ".join(bad))
+d["focus"] = ids
+json.dump(d, open(path, "w"), ensure_ascii=False, indent=1)
+print("event-view: in discussion: " + (", ".join(ids) if ids else "nothing marked"))
+PY
+	;;
+ids)
+	python3 - $DIR/events.json "${2:-}" <<'PY'
+import json, sys
+d, q = json.load(open(sys.argv[1])), sys.argv[2].lower()
+for e in d["events"]:
+    if q in (e["id"] + " " + e["title"] + " " + e["place"]).lower():
+        print(f'{e["id"]:38} {e["date"]:10}  {e["title"]}')
+PY
+	;;
+*)
+	print -u2 "usage: event-view [on|off|status|focus ID...|ids [TEXT]]"
+	exit 2
+	;;
+esac

@@ -1,0 +1,1024 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>event-view</title>
+<style>
+  html, body { height: 100%; margin: 0; overflow: hidden; background: #0a1018; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: grab; touch-action: none; }
+  canvas.dragging { cursor: grabbing; }
+  canvas.point { cursor: pointer; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+'use strict';
+// event-view: current events on a character-grid globe.
+// Everything on screen is one grid of monospace cells: the globe, the panels,
+// the leader lines. Map data: land.bin + countries.json (tools/build_map.py).
+// Events: events.json, re-read every 15 s so it can be edited while the page is open.
+
+const TAU = Math.PI * 2, RAD = Math.PI / 180, DEG = 180 / Math.PI;
+const FONT = 'Menlo, "SF Mono", Monaco, "DejaVu Sans Mono", Consolas, monospace';
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+
+// ---------- palettes ----------
+// Color slots; cells store a slot number, each design supplies the hex.
+const K = { dim: 1, text: 2, bright: 3, accent: 4, grat: 5, night: 6, land: 7, evt: 12, hover: 13,
+            line: 14, panel: 15, selbg: 16, bar: 17, cat: 18, nevt: 27, atmo: 28, bg: 29, nland: 30, water: 35, relief: 36 };
+function palette(o) {
+  const a = [];
+  for (const k in K) if (typeof o[k] === 'string') a[K[k]] = o[k];
+  o.land.forEach((c, i) => { a[K.land + i] = c; a[K.nland + i] = o.nland ? o.nland[i] : o.night; });
+  o.cat.forEach((c, i) => a[K.cat + i] = c);
+  a[K.water] = o.water || o.accent; a[K.relief] = o.relief || o.nevt;
+  a[0] = o.text;
+  return a;
+}
+const CAT_NAMES = ['conflict', 'economy', 'finance', 'logistics', 'production', 'space', 'tech', 'politics', 'climate'];
+const CAT_TAGS = ['CON', 'ECO', 'FIN', 'LOG', 'PRD', 'SPC', 'TEC', 'POL', 'CLI'];
+const STATUS_GLYPH = { live: '●', upcoming: '○', watch: '◇' };
+
+// Themes are independent of the design; each design has a native one.
+// political: every country takes one of five hues, no two neighbors alike.
+const THEMES = [
+  { name: 'AMBER', pal: palette({ water: '#5fb8d6',
+      bg: '#120d07', dim: '#80602a', text: '#d9a441', bright: '#ffdf9a', accent: '#7fe3ff', grat: '#3d2c11',
+      night: '#7a5a22', land: ['#c98f2a', '#b98224', '#d39a35', '#c08829', '#cf9530'], evt: '#fff1cf',
+      hover: '#ffffff', line: '#5a4418', panel: '#1c150b', selbg: '#2c210f', bar: '#1c150b', nevt: '#a8905e', atmo: '#2c200d',
+      cat: ['#ff8a75', '#7fe3ff', '#7fe3ff', '#7fe3ff', '#7fe3ff', '#7fe3ff', '#7fe3ff', '#7fe3ff', '#7fe3ff'] }) },
+  { name: 'NAVY', pal: palette({ water: '#4f9fd8',
+      bg: '#0a1018', dim: '#5d6e84', text: '#b9c6d6', bright: '#f2f6fb', accent: '#ffcf5a', grat: '#22344a',
+      night: '#3d5068', land: ['#6f8299', '#8193a8', '#62768f', '#8c9cae', '#586d87'], evt: '#f0b765',
+      hover: '#ffffff', line: '#3f546e', panel: '#101a27', selbg: '#1a2a3e', bar: '#111c2a', nevt: '#a07a44', atmo: '#1b2a3d',
+      cat: ['#ff6f61', '#f2c14e', '#8fd16a', '#4fc9c0', '#e59a5c', '#b9a0ff', '#6fb1ff', '#f291c7', '#86dcff'] }) },
+  { name: 'PAPER', pal: palette({ water: '#2f7fb5',
+      bg: '#e6ecee', dim: '#788a93', text: '#2a3b47', bright: '#0c1a24', accent: '#c2371d', grat: '#b4c5cc',
+      night: '#8ea4af', land: ['#33566b', '#4d7187', '#25455a', '#5d8094', '#3d6177'], evt: '#c2371d',
+      hover: '#000000', line: '#9fb0b9', panel: '#dae3e6', selbg: '#c9d6db', bar: '#d3dde1', nevt: '#d07f70', atmo: '#c5d2d8',
+      cat: ['#c2371d', '#a06c00', '#3f7d1f', '#0f7f78', '#a3541a', '#6a45c9', '#1f63c4', '#b53a84', '#1a7fa8'] }) },
+  { name: 'ATLAS', political: true, pal: palette({ water: '#59b6ff',
+      bg: '#0b1320', dim: '#63748c', text: '#c3cedc', bright: '#ffffff', accent: '#ffe08a', grat: '#1f3048',
+      night: '#3d5068', land: ['#e8836a', '#7fc29b', '#f0cf7e', '#74aaf0', '#c893e0'],
+      nland: ['#8a5246', '#4d7560', '#8d7b4f', '#47668e', '#765886'], evt: '#ffffff',
+      hover: '#ffffff', line: '#3a4e69', panel: '#111c2c', selbg: '#1d2d44', bar: '#111c2c', nevt: '#9aa7b8', atmo: '#182841',
+      cat: ['#ff5d52', '#ffe08a', '#b8f08a', '#6fe6dc', '#ffb070', '#d6c2ff', '#9ccbff', '#ffade0', '#b5ecff'] }) },
+  { name: 'ATLAS LIGHT', political: true, pal: palette({ water: '#1f6fc0',
+      bg: '#f1f3ee', dim: '#7c8780', text: '#2c352f', bright: '#0b120d', accent: '#b3261e', grat: '#c6cec5',
+      night: '#a3ada5', land: ['#c8553d', '#2f8a62', '#b0810f', '#2f6fbe', '#8a4fb0'],
+      nland: ['#dea193', '#93c2ac', '#d6bd80', '#94b4de', '#c0a2d4'], evt: '#0b120d',
+      hover: '#000000', line: '#aab4ab', panel: '#e3e7e0', selbg: '#d2d9d0', bar: '#dde2da', nevt: '#7c8780', atmo: '#d3dad1',
+      cat: ['#b3261e', '#7a5600', '#2d6a12', '#0b6b64', '#8a4310', '#5a35b5', '#144fa8', '#9c2a70', '#0f6a8f'] }) },
+  { name: 'TERMINAL', pal: palette({ water: '#58c7c0',
+      bg: '#050d08', dim: '#3f7a52', text: '#7fd697', bright: '#d6ffe0', accent: '#ffd866', grat: '#12301c',
+      night: '#2c5e3c', land: ['#4fb56c', '#45a561', '#5cc079', '#4aac66', '#56ba73'], evt: '#d6ffe0',
+      hover: '#ffffff', line: '#235034', panel: '#0a1a10', selbg: '#12301c', bar: '#0a1a10', nevt: '#6f9c7c', atmo: '#0f2616',
+      cat: ['#ff7b6b', '#ffd866', '#ffd866', '#ffd866', '#ffd866', '#ffd866', '#ffd866', '#ffd866', '#ffd866'] }) },
+];
+const DESIGNS = [{ name: 'WIRE', theme: 1 }, { name: 'CHART', theme: 2 }, { name: 'SCOPE', theme: 0 }];
+
+// ---------- state ----------
+const store = { get(k, d) { try { const v = localStorage.getItem('ev.' + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+                set(k, v) { try { localStorage.setItem('ev.' + k, JSON.stringify(v)); } catch (e) {} } };
+const HASH = location.hash.slice(1).split(':');   // #design[:event-id[:zoom[:theme]]]
+const hashDesign = parseInt(HASH[0], 10);
+const S = {
+  design: hashDesign >= 1 && hashDesign <= 3 ? hashDesign - 1 : 2,
+  theme: store.get('theme', -1),          // -1: the design's native theme
+  lon: 30, lat: 28, zoom: 1, spin: true, sel: null, fly: null, filter: -1,
+  fs: store.get('fs', 13), cities: false, help: false, chooser: location.hash === '#choose',
+  news: store.get('news', true),          // false hides every event: pins, cards, labels, tint
+  geo: false,                             // rivers and ranges drawn on the map
+  states: store.get('states', false),     // US states and Canadian provinces drawn as their own areas
+  scaps: store.get('scaps', false),       // their capitals marked
+};
+let MW = 0, MH = 0, LAND = null, COUNTRIES = [null], CITIES = [];
+let WATER = null, RELIEF = null, FW = [null], FR = [null], RIVERS = [];   // seas and lakes, ranges, rivers
+const ISLAKE = new Uint8Array(256);
+// US states and Canadian provinces ride at the end of COUNTRIES (index SOFF + n),
+// so everything that draws, names or lights a country does the same for them.
+let STATES = null, SOFF = 0, CAPS = [], STATECAPS = [], showStates = false;
+let NAMEU = [], NAMEL = [], byCode = {};
+let EVENTS = [], FOCUS = [], UPDATED = '', eventsRaw = '';
+let EVC = new Uint8Array(256);          // country index -> has an event under the current filter
+let TH = THEMES[0], P = TH.pal;
+
+// ---------- the character grid ----------
+const canvas = document.getElementById('c'), ctx = canvas.getContext('2d');
+let cols = 0, rows = 0, cw = 8, ch = 16, dpr = 1;
+let G_ch, G_fg, G_bg, G_kind, G_riv;    // kind: 1 land, 2 marker; riv: river index + 1
+let brFont = '', brSy = 1, brDy = 0;
+const hits = [];                        // clickable rectangles, rebuilt every frame
+let dirty = true;
+
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  const w = window.innerWidth, h = window.innerHeight;
+  canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.font = S.fs + 'px ' + FONT;
+  cw = ctx.measureText('MMMMMMMMMM').width / 10;
+  ch = Math.round(S.fs * 1.3);
+  cols = Math.max(40, Math.floor(w / cw)); rows = Math.max(16, Math.floor(h / ch));
+  const n = cols * rows;
+  G_ch = new Uint16Array(n); G_fg = new Uint8Array(n); G_bg = new Uint8Array(n); G_kind = new Uint8Array(n); G_riv = new Int16Array(n);
+  // Braille comes from a fallback font, so scale it until one glyph is one
+  // cell wide and its four dot rows fill the cell height.
+  const m0 = ctx.measureText('⣿');
+  const size = S.fs * cw / (m0.width || cw);
+  brFont = size + 'px ' + FONT;
+  ctx.font = brFont;
+  const m = ctx.measureText('⣿');
+  const bw = m.actualBoundingBoxLeft + m.actualBoundingBoxRight, bh = m.actualBoundingBoxAscent + m.actualBoundingBoxDescent;
+  const dot = Math.max(0.5, bw - cw / 2), pitch = (bh - dot) / 3;
+  brSy = pitch > 0 ? clamp((ch / 4) / pitch, 0.6, 2.5) : 1;
+  brDy = (m.actualBoundingBoxAscent - m.actualBoundingBoxDescent) / 2;
+  ctx.font = S.fs + 'px ' + FONT;
+  dirty = true;
+}
+
+function clear() { G_ch.fill(32); G_fg.fill(0); G_bg.fill(0); G_kind.fill(0); G_riv.fill(0); hits.length = 0; }
+function put(x, y, s, fg, bg) {
+  if (y < 0 || y >= rows) return;
+  for (let i = 0; i < s.length; i++) {
+    const X = x + i; if (X < 0 || X >= cols) continue;
+    const k = y * cols + X;
+    G_ch[k] = s.charCodeAt(i); G_fg[k] = fg;
+    if (bg !== undefined) G_bg[k] = bg;
+  }
+}
+function fill(x, y, w, h, bg) {
+  for (let r = Math.max(0, y); r < Math.min(rows, y + h); r++)
+    for (let c = Math.max(0, x); c < Math.min(cols, x + w); c++) { const k = r * cols + c; G_ch[k] = 32; G_bg[k] = bg; G_kind[k] = 2; }
+}
+function box(x, y, w, h, title, fg, bg) {
+  fill(x, y, w, h, bg);
+  put(x, y, '┌' + '─'.repeat(w - 2) + '┐', fg); put(x, y + h - 1, '└' + '─'.repeat(w - 2) + '┘', fg);
+  for (let r = y + 1; r < y + h - 1; r++) { put(x, r, '│', fg); put(x + w - 1, r, '│', fg); }
+  if (title) put(x + 2, y, ' ' + title + ' ', K.dim);
+}
+function wrap(text, width) {
+  const out = []; let line = '';
+  for (const word of String(text).split(/\s+/)) {
+    if (!line.length) line = word;
+    else if (line.length + 1 + word.length <= width) line += ' ' + word;
+    else { out.push(line); line = word; }
+    while (line.length > width) { out.push(line.slice(0, width)); line = line.slice(width); }
+  }
+  if (line) out.push(line);
+  return out;
+}
+const cut = (s, n) => s.length <= n ? s : s.slice(0, Math.max(0, n - 1)) + '…';
+
+function flush() {
+  ctx.fillStyle = P[K.bg]; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols;) {
+      const b = G_bg[y * cols + x]; if (!b) { x++; continue; }
+      let n = 1; while (x + n < cols && G_bg[y * cols + x + n] === b) n++;
+      ctx.fillStyle = P[b]; ctx.fillRect(Math.floor(x * cw), y * ch, Math.ceil(n * cw), ch);
+      x += n;
+    }
+  }
+  ctx.textBaseline = 'middle';
+  let anyBraille = false, cur = -1;
+  for (let y = 0; y < rows; y++) {
+    const base = y * cols, cy = y * ch + ch / 2 + 0.5;
+    for (let x = 0; x < cols;) {
+      const c = G_ch[base + x];
+      if (c === 32 || c === 0) { x++; continue; }
+      if (c >= 0x2800 && c <= 0x28FF) { anyBraille = true; x++; continue; }
+      const fg = G_fg[base + x];
+      if (fg !== cur) { ctx.fillStyle = P[fg] || P[0]; cur = fg; }
+      if (c >= 0x2580) {                 // symbols may come from a fallback font: center each in its cell
+        ctx.textAlign = 'center'; ctx.fillText(String.fromCharCode(c), x * cw + cw / 2, cy); ctx.textAlign = 'left';
+        x++; continue;
+      }
+      let n = 1;
+      while (x + n < cols) { const d = G_ch[base + x + n]; if (d === 32 || d === 0 || d >= 0x2580 || G_fg[base + x + n] !== fg) break; n++; }
+      ctx.fillText(String.fromCharCode.apply(null, G_ch.subarray(base + x, base + x + n)), x * cw, cy);
+      x += n;
+    }
+  }
+  if (!anyBraille) return;
+  ctx.save(); ctx.font = brFont; ctx.textBaseline = 'alphabetic'; ctx.scale(1, brSy); cur = -1;
+  for (let y = 0; y < rows; y++) {
+    const base = y * cols, cy = (y * ch + ch / 2) / brSy + brDy;
+    for (let x = 0; x < cols;) {
+      const c = G_ch[base + x];
+      if (c < 0x2800 || c > 0x28FF) { x++; continue; }
+      const fg = G_fg[base + x];
+      if (fg !== cur) { ctx.fillStyle = P[fg] || P[0]; cur = fg; }
+      let n = 1;
+      while (x + n < cols) { const d = G_ch[base + x + n]; if (d < 0x2800 || d > 0x28FF || G_fg[base + x + n] !== fg) break; n++; }
+      ctx.fillText(String.fromCharCode.apply(null, G_ch.subarray(base + x, base + x + n)), x * cw, cy);
+      x += n;
+    }
+  }
+  ctx.restore(); ctx.font = S.fs + 'px ' + FONT;
+}
+
+// ---------- the globe ----------
+// View space: x right, y up, z toward the viewer. World: X = cos(lat)sin(lon),
+// Y = sin(lat), Z = cos(lat)cos(lon).
+let V = { gx: 0, gy: 0, Rc: 1, Rr: 1, x0: 0, x1: 0, y0: 0, y1: 0 };
+let cp = 1, sp = 0, cl = 1, sl = 0, lon0 = 0, sunX = 0, sunY = 0, sunZ = 1;
+let oId = 0, oLat = 0, oLon = 0, oDay = true, oW = 0, oR = 0;
+// What the quiz has lit, and whether every range is drawn.
+const HI = { country: 0, water: 0, relief: 0, river: -1, city: null };
+let showRanges = false;
+let mouse = { col: -1, row: -1, down: false, moved: false, x: 0, y: 0 };
+let hoverId = 0, hoverCity = null, hoverEvent = null, hoverW = 0, hoverR = 0, hoverRiv = 0;
+
+function setView(x0, x1, y0, y1) {
+  const Rr = Math.max(3, Math.min((y1 - y0 + 1) / 2 - 1, ((x1 - x0 + 1) / 2 - 2) * cw / ch)) * S.zoom;
+  V = { gx: (x0 + x1 + 1) / 2, gy: (y0 + y1 + 1) / 2, Rr, Rc: Rr * ch / cw, x0, x1, y0, y1 };
+  const la = S.lat * RAD; lon0 = S.lon * RAD;
+  cp = Math.cos(la); sp = Math.sin(la); cl = Math.cos(lon0); sl = Math.sin(lon0);
+  // Subsolar point from the clock: good to a degree or two, which is a cell.
+  const now = new Date(), y = now.getUTCFullYear();
+  const doy = (Date.UTC(y, now.getUTCMonth(), now.getUTCDate()) - Date.UTC(y, 0, 0)) / 864e5;
+  const decl = -23.44 * Math.cos(TAU * (doy + 10) / 365) * RAD;
+  const slon = -15 * (now.getUTCHours() + now.getUTCMinutes() / 60 - 12) * RAD;
+  sunX = Math.cos(decl) * Math.sin(slon); sunY = Math.sin(decl); sunZ = Math.cos(decl) * Math.cos(slon);
+}
+function samp(nx, ny) {
+  const r2 = nx * nx + ny * ny; if (r2 > 1) return false;
+  const z = Math.sqrt(1 - r2);
+  const y1 = ny * cp + z * sp, z1 = -ny * sp + z * cp;
+  const X = nx * cl + z1 * sl, Z = -nx * sl + z1 * cl;
+  oLat = Math.asin(y1 > 1 ? 1 : y1 < -1 ? -1 : y1); oLon = Math.atan2(X, Z);
+  let ix = ((oLon + Math.PI) / TAU * MW) | 0; if (ix >= MW) ix = MW - 1;
+  let iy = ((Math.PI / 2 - oLat) / Math.PI * MH) | 0; if (iy >= MH) iy = MH - 1;
+  const i = iy * MW + ix;
+  oId = LAND[i]; oW = WATER[i]; oR = RELIEF[i]; oDay = X * sunX + y1 * sunY + Z * sunZ > -0.05;
+  if (oW && ISLAKE[oW]) oId = 0;         // a lake is water, whatever country surrounds it
+  else if (showStates && oId && STATES[i]) oId = SOFF + STATES[i];
+  return true;
+}
+function project(lat, lon) {
+  const la = lat * RAD, dl = lon * RAD - lon0;
+  const X = Math.cos(la) * Math.sin(dl), Y = Math.sin(la), Z = Math.cos(la) * Math.cos(dl);
+  const x = X, y = Y * cp - Z * sp, z = Y * sp + Z * cp;
+  return { z, col: Math.floor(V.gx + x * V.Rc), row: Math.floor(V.gy - y * V.Rr) };
+}
+function cellGeo(col, row) {             // what is under a cell: sets oId/oLat/oLon
+  return samp((col + 0.5 - V.gx) / V.Rc, -(row + 0.5 - V.gy) / V.Rr);
+}
+function landColor(id) {
+  if (id === hoverId || id === HI.country) return K.hover;
+  const c = COUNTRIES[id], sh = c.shade % 5;
+  if (TH.political) return (oDay ? K.land : K.nland) + sh;
+  if (EVC[c.state ? c.pid : id]) return oDay ? K.evt : K.nevt;
+  return oDay ? K.land + sh : K.night;
+}
+function graticule(k, tolLat, tolLon) {
+  const la = oLat * DEG, lo = oLon * DEG;
+  if (Math.abs(la - 30 * Math.round(la / 30)) < tolLat) { G_ch[k] = Math.abs(la) < 15 ? 0x2D : 0xB7; G_fg[k] = K.grat; }
+  else if (Math.abs(lo - 30 * Math.round(lo / 30)) < tolLon / Math.max(0.15, Math.cos(oLat))) { G_ch[k] = 0xB7; G_fg[k] = K.grat; }
+}
+const Lc = new Int16Array(256), Lr = new Int16Array(256);
+
+function drawGlobe(mode) {
+  const { gx, gy, Rc, Rr, x0, x1, y0, y1 } = V;
+  const ra = Math.max(y0, Math.floor(gy - Rr) - 1), rb = Math.min(y1, Math.ceil(gy + Rr) + 1);
+  const ca = Math.max(x0, Math.floor(gx - Rc) - 2), cb = Math.min(x1, Math.ceil(gx + Rc) + 2);
+  const tolLat = DEG / Rr * 0.5, tolLon = DEG / Rc * 0.5;
+  if (mode === 'names') for (let i = 1; i < COUNTRIES.length; i++) {
+    const p = project(COUNTRIES[i].label[1], COUNTRIES[i].label[0]); Lc[i] = p.col; Lr[i] = p.row;
+  }
+  for (let row = ra; row <= rb; row++) {
+    const ny = -(row + 0.5 - gy) / Rr;
+    for (let col = ca; col <= cb; col++) {
+      const nx = (col + 0.5 - gx) / Rc, k = row * cols + col;
+      if (!samp(nx, ny)) { if (nx * nx + ny * ny < 1.06) { G_ch[k] = 0xB7; G_fg[k] = K.atmo; } continue; }
+      if (!oId) {
+        if (oW && oW === HI.water) { G_ch[k] = 0x7E; G_fg[k] = K.accent; } else graticule(k, tolLat, tolLon);
+        continue;
+      }
+      G_kind[k] = 1; G_fg[k] = landColor(oId);
+      if (oR && (oR === HI.relief || showRanges)) { G_ch[k] = 0x5E; if (oR === HI.relief) G_fg[k] = K.accent; continue; }
+      if (mode === 'names') {              // the land spells its own name, anchored to the country
+        const s = oDay ? NAMEU[oId] : NAMEL[oId];
+        let ph = (col - Lc[oId] + (row - Lr[oId]) * 3) % s.length; if (ph < 0) ph += s.length;
+        G_ch[k] = s.charCodeAt(ph);
+      } else G_ch[k] = oDay ? 0x23 : 0x3A;   // '#' by day, ':' by night
+    }
+  }
+}
+
+let subIds = new Uint8Array(0);
+const BR = [0x01, 0x08, 0x02, 0x10, 0x04, 0x20, 0x40, 0x80];   // dot bits, row-major 2x4
+function drawGlobeBraille() {
+  const { gx, gy, Rc, Rr, x0, x1, y0, y1 } = V;
+  const ra = Math.max(y0, Math.floor(gy - Rr) - 1), rb = Math.min(y1, Math.ceil(gy + Rr) + 1);
+  const ca = Math.max(x0, Math.floor(gx - Rc) - 2), cb = Math.min(x1, Math.ceil(gx + Rc) + 2);
+  const bw = cb - ca + 1, bh = rb - ra + 1; if (bw <= 0 || bh <= 0) return;
+  const sw = bw * 2 + 1, sh = bh * 4 + 1;
+  if (subIds.length < sw * sh) subIds = new Uint8Array(sw * sh);
+  for (let sy = 0; sy < sh; sy++) {
+    const ny = -(ra + sy / 4 + 0.125 - gy) / Rr;
+    for (let sx = 0; sx < sw; sx++) subIds[sy * sw + sx] = samp((ca + sx / 2 + 0.25 - gx) / Rc, ny) ? oId : 255;
+  }
+  const tolLat = DEG / Rr * 0.5, tolLon = DEG / Rc * 0.5;
+  for (let r = 0; r < bh; r++) for (let c = 0; c < bw; c++) {
+    let bits = 0, cid = 0;
+    for (let j = 0; j < 8; j++) {
+      const i = (r * 4 + (j >> 1)) * sw + c * 2 + (j & 1), id = subIds[i];
+      if (!id || id === 255) continue;
+      const rt = subIds[i + 1], dn = subIds[i + sw];
+      if ((rt && rt !== 255 && rt !== id) || (dn && dn !== 255 && dn !== id)) continue;   // a border: leave the dot dark
+      bits |= BR[j]; cid = id;
+    }
+    const row = ra + r, col = ca + c, k = row * cols + col;
+    const inside = samp((col + 0.5 - gx) / Rc, -(row + 0.5 - gy) / Rr);
+    if (bits) {
+      G_ch[k] = 0x2800 | bits; G_fg[k] = landColor(cid); G_kind[k] = 1;
+      if (inside && oId && oR) { if (oR === HI.relief) G_fg[k] = K.accent; else if (showRanges) G_fg[k] = K.relief; }
+    }
+    else if (inside) { if (!oId) { if (oW && oW === HI.water) { G_ch[k] = 0x2836; G_fg[k] = K.accent; } else graticule(k, tolLat, tolLon); } }
+    else { const nx = (col + 0.5 - gx) / Rc, ny = (row + 0.5 - gy) / Rr; if (nx * nx + ny * ny < 1.06) { G_ch[k] = 0xB7; G_fg[k] = K.atmo; } }
+  }
+}
+
+// ---------- events on the globe ----------
+function shown(e) { return S.news && (S.filter < 0 || e.cat === S.filter); }
+function setNews(on) { S.news = on; store.set('news', on); if (!on) S.sel = null; markCountries(); dirty = true; }
+function visibleEvents() {
+  const out = [];
+  for (const e of EVENTS) {
+    if (!shown(e)) continue;
+    const p = project(e.lat, e.lon);
+    if (p.z < 0.06 || p.col < V.x0 || p.col > V.x1 || p.row < V.y0 || p.row > V.y1) continue;
+    out.push({ e, col: p.col, row: p.row, z: p.z, pri: p.z + (e.focus ? 2 : 0) + (e.id === S.sel ? 3 : 0) });
+  }
+  return out;
+}
+function drawMarkers(vis) {
+  const blink = Math.floor(performance.now() / 450) % 2 === 0;
+  const cells = new Map();
+  for (const v of vis) { const k = v.row * cols + v.col; if (!cells.has(k)) cells.set(k, []); cells.get(k).push(v); }
+  for (const [k, list] of cells) {
+    list.sort((a, b) => b.pri - a.pri);
+    const top = list[0].e, sel = list.some(v => v.e.id === S.sel), hov = list.some(v => v.e === hoverEvent);
+    let g = list.length > 1 ? (list.length > 9 ? '+' : String(list.length)) : STATUS_GLYPH[top.status] || '●';
+    if (top.focus && !blink) g = '◎';
+    G_ch[k] = g.charCodeAt(0); G_fg[k] = sel || hov ? K.bright : K.cat + top.cat; G_kind[k] = 2;
+    G_bg[k] = sel ? K.selbg : list.length > 1 || TH.political ? K.panel : 0;
+    const col = k % cols, row = (k - col) / cols;
+    hits.push({ x0: col - 1, x1: col + 1, y0: row, y1: row, ev: list[(list.findIndex(v => v.e.id === S.sel) + 1) % list.length].e });
+  }
+}
+function drawPlaces() { if (S.cities) drawCities(CAPS); if (S.scaps) drawCities(STATECAPS); }
+function drawCities(list) {
+  for (const c of list) {
+    const p = project(c.lat, c.lon);
+    if (p.z < 0.1 || p.col < V.x0 || p.col > V.x1 || p.row < V.y0 || p.row > V.y1) continue;
+    const k = p.row * cols + p.col; if (G_kind[k] === 2) continue;
+    G_ch[k] = 0x2B; G_fg[k] = c === hoverCity ? K.bright : K.accent;
+  }
+}
+
+function drawRivers(all, target) {
+  const cell = (c, r, ri, fg) => {
+    if (c < V.x0 || c > V.x1 || r < V.y0 || r > V.y1) return;
+    const k = r * cols + c; if (G_kind[k] === 2) return;
+    G_ch[k] = 0x7E; G_fg[k] = fg; G_riv[k] = ri + 1;
+  };
+  const one = (rv, ri, fg) => {
+    for (const line of rv.lines) {
+      let pc = 0, pr = 0, pv = false;
+      for (let i = 0; i < line.length; i += 2) {
+        const p = project(line[i + 1], line[i]), v = p.z > 0.03;
+        if (v && pv) {
+          const n = Math.max(Math.abs(p.col - pc), Math.abs(p.row - pr), 1);
+          if (n < 40) for (let t = 0; t <= n; t++) cell(Math.round(pc + (p.col - pc) * t / n), Math.round(pr + (p.row - pr) * t / n), ri, fg);
+        }
+        pc = p.col; pr = p.row; pv = v;
+      }
+    }
+  };
+  if (all) RIVERS.forEach((rv, ri) => { if (ri !== target) one(rv, ri, K.water); });
+  if (target >= 0) one(RIVERS[target], target, K.accent);   // last, so it sits on top
+}
+const popText = p => p >= 1e6 ? (p / 1e6).toFixed(p >= 1e7 ? 0 : 1) + ' million' : p.toLocaleString('en-US');
+
+// ---------- cards, bars, overlays ----------
+const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function when(e) {
+  const p = e.date.split('-');
+  if (p.length < 3) return MON[+p[1] - 1] + ' ' + p[0];
+  let s = p[2] + ' ' + MON[+p[1] - 1];
+  if (e.end) { const q = e.end.split('-'); s = q[1] === p[1] ? p[2] + '–' + q[2] + ' ' + MON[+p[1] - 1] : s + '–' + q[2] + ' ' + MON[+q[1] - 1]; }
+  if (e.status === 'upcoming') {
+    const t = new Date(), d = Math.round((Date.UTC(+p[0], +p[1] - 1, +p[2]) - Date.UTC(t.getFullYear(), t.getMonth(), t.getDate())) / 864e5);
+    s += d > 0 ? ' · in ' + d + 'd' : d === 0 ? ' · today' : '';
+  }
+  return s;
+}
+function cardHeight(e, w) { return e.id === S.sel ? 2 + wrap(e.sum, w - 6).length + wrap(e.src, w - 6).length + 1 : 2; }
+function drawCard(x, y, w, e) {
+  const sel = e.id === S.sel, hov = e === hoverEvent, h = cardHeight(e, w);
+  if (sel) fill(x, y, w, h, K.selbg);
+  put(x, y, e.focus ? '▶' : STATUS_GLYPH[e.status] || '●', e.focus ? K.accent : K.cat + e.cat);
+  put(x + 2, y, CAT_TAGS[e.cat], K.cat + e.cat);
+  put(x + 6, y, cut(e.title, w - 6), sel || hov || e.focus ? K.bright : K.text);
+  put(x + 6, y + 1, cut(when(e) + ' · ' + e.place, w - 6), K.dim);
+  if (sel) {
+    let r = y + 2;
+    for (const l of wrap(e.sum, w - 6)) put(x + 6, r++, l, K.text);
+    for (const l of wrap(e.src, w - 6)) put(x + 6, r++, l, K.dim);
+    put(x + 6, r, cut('[' + e.tag + ']' + (e.also && e.also.length ? '  also ' + e.also.join(' ') : ''), w - 6), K.dim);
+  }
+  hits.push({ x0: x, x1: x + w - 1, y0: y, y1: y + h - 1, ev: e });
+  return h;
+}
+function centerCountry() { const k = hoverId; let id = 0; if (samp(0, 0)) id = oId; hoverId = k; return id; }
+function topBar(nVis) {
+  fill(0, 0, cols, 1, K.bar);
+  let x = 1; put(x, 0, 'EVENT-VIEW', K.bright); x += 12;
+  DESIGNS.forEach((d, i) => {
+    const s = (i + 1) + ' ' + d.name;
+    put(x, 0, s, i === S.design ? K.accent : K.dim);
+    hits.push({ x0: x, x1: x + s.length - 1, y0: 0, y1: 0, fn: () => setDesign(i) });
+    x += s.length + 2;
+  });
+  const n = EVENTS.filter(shown).length;
+  const f = S.filter < 0 ? 'all' : CAT_NAMES[S.filter];
+  const btn = (s, fg, fn) => { put(x, 0, s, fg); hits.push({ x0: x, x1: x + s.length - 1, y0: 0, y1: 0, fn }); x += s.length; };
+  const txt = s => { put(x, 0, s, K.dim); x += s.length; };
+  txt('│ ');
+  if (Q.on) btn('QUIZ', K.accent, () => quizLeave());
+  else {
+    btn(S.news ? 'news on' : 'news off', S.news ? K.text : K.accent, () => setNews(!S.news));
+    if (S.news) { txt(' │ ' + nVis + ' in view of ' + n + ' │ '); btn('filter ' + f, K.dim, () => { S.filter = S.filter >= CAT_NAMES.length - 1 ? -1 : S.filter + 1; markCountries(); dirty = true; }); }
+    txt(' │ '); btn('quiz', K.text, () => quizStart());
+  }
+  txt(' │ '); btn('theme ' + TH.name, K.text, () => nextTheme(1));
+  txt(' │ '); btn('[−]', K.accent, () => zoomBy(1 / 1.25)); txt(' zoom ' + S.zoom.toFixed(1) + '× '); btn('[+]', K.accent, () => zoomBy(1.25));
+  const d = new Date(), pad = v => String(v).padStart(2, '0');
+  const cid = centerCountry();
+  const pos = Math.abs(S.lat).toFixed(0).padStart(2, '0') + '°' + (S.lat >= 0 ? 'N' : 'S') + ' ' +
+              Math.abs(S.lon).toFixed(0).padStart(3, '0') + '°' + (S.lon >= 0 ? 'E' : 'W');
+  const clock = pad(d.getUTCDate()) + ' ' + MON[d.getUTCMonth()] + ' ' + pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ' UTC';
+  // In the quiz the bar must not name what is at the center.
+  const where = pos + (Q.on ? '' : cid ? ' ' + COUNTRIES[cid].name : ' open water');
+  for (const right of [where + ' │ ' + clock + (UPDATED && !Q.on ? ' │ record ' + UPDATED : ''), where + ' │ ' + clock, where])
+    if (cols - right.length - 1 > x + 2) { put(cols - right.length - 1, 0, right, K.dim); break; }
+}
+function bottomBar() {
+  fill(0, rows - 1, cols, 1, K.bar);
+  const s = Q.on ? 'drag turn · wheel zoom · 1–4 answer · enter next · x name it / find it · o region · t theme · q leave the quiz'
+    : 'drag turn · wheel zoom · space ' + (S.spin ? 'hold' : 'spin') + ' · n/p event · f filter · e news · g rivers+ranges · c capitals · s states · t theme · q quiz · ? keys';
+  put(1, rows - 1, cut(s, cols - 2), K.dim);
+}
+function tooltip() {
+  if (mouse.col < 0 || mouse.down) return;
+  let s = '';
+  if (hoverEvent) s = hoverEvent.title;
+  else if (hoverCity) s = hoverCity.name + ', capital of ' + hoverCity.country;
+  else if (hoverRiv) s = RIVERS[hoverRiv - 1].name + ' (river)';
+  else if (hoverId) { const c = COUNTRIES[hoverId]; s = c.name + (c.capital ? ' · ' + c.capital : '') + (hoverR ? ' · ' + FR[hoverR].name : ''); }
+  else if (hoverW) s = FW[hoverW].name;
+  if (!s) return;
+  s = ' ' + s + ' ';
+  let x = mouse.col + 2; if (x + s.length > cols - 1) x = mouse.col - s.length - 1;
+  const y = mouse.row > 1 ? mouse.row - 1 : mouse.row + 1;
+  fill(x, y, s.length, 1, K.selbg); put(x, y, s, K.bright);
+}
+function helpOverlay() {
+  const L = ['drag            turn the globe', 'wheel  + -      zoom', 'arrows          turn by keys', 'space           hold / resume the slow spin',
+    'n  p            next / previous event (flies there)', 'click           select an event, a marker or a card', 'esc             clear the selection',
+    'f               filter by category', 'e               news on / off (a bare globe when off)',
+    'g               draw rivers and mountain ranges', 'c               show capitals', 's               show US states and Canadian provinces', 'C               show their capitals', 'q               geography quiz', '1 2 3           switch design',
+    't  T            next / previous color theme', '0               back to the design\'s own theme', '[  ]            smaller / larger text',
+    '', '●  happened, still developing', '○  scheduled or expected', '◇  standing situation being watched', '▶  in discussion right now (event-view focus ID)'];
+  const w = 58, h = L.length + 4, x = Math.floor((cols - w) / 2), y = Math.max(1, Math.floor((rows - h) / 2));
+  box(x, y, w, h, 'KEYS', K.dim, K.panel);
+  L.forEach((l, i) => put(x + 3, y + 2 + i, l, K.text));
+}
+
+// ---------- design 1: WIRE (callouts pulled out to both margins) ----------
+function leader(fromX, y, mc, mr, fg, force) {
+  const dir = mc > fromX ? 1 : -1;
+  const cell = (x, yy, g) => {
+    if (x < V.x0 || x > V.x1 || yy < V.y0 || yy > V.y1) return;
+    const k = yy * cols + x;
+    if (G_kind[k] === 2 || (!force && G_kind[k] === 1)) return;   // pass behind land unless highlighted
+    G_ch[k] = g; G_fg[k] = fg;
+  };
+  for (let x = fromX; x !== mc; x += dir) cell(x, y, 0x2500);
+  if (mr === y) return;
+  cell(mc, y, dir > 0 ? (mr > y ? 0x2510 : 0x2518) : (mr > y ? 0x250C : 0x2514));
+  for (let yy = Math.min(y, mr) + 1; yy < Math.max(y, mr); yy++) cell(mc, yy, 0x2502);
+}
+function renderWire() {
+  const cwid = clamp(Math.floor(cols * 0.25), 30, 46);
+  const narrow = cols < 110;
+  setView(narrow ? 0 : cwid + 1, narrow ? cols - 1 : cols - cwid - 2, 1, rows - 2);
+  drawGlobe('tint');
+  if (S.geo) drawRivers(true, -1);
+  const vis = visibleEvents();
+  if (!narrow) for (const side of [0, 1]) {
+    const mine = vis.filter(v => (v.col < V.gx) === (side === 0)).sort((a, b) => b.pri - a.pri);
+    const x = side === 0 ? 1 : cols - cwid, avail = rows - 3;
+    let used = 0; const keep = [];
+    for (const v of mine) { const h = cardHeight(v.e, cwid - 1) + 1; if (used + h > avail) break; used += h; keep.push(v); }
+    keep.sort((a, b) => a.row - b.row || a.col - b.col);
+    let y = 2 + Math.floor((avail - used) / 2);
+    for (const v of keep) {
+      const hot = v.e.id === S.sel || v.e === hoverEvent;
+      leader(side === 0 ? cwid : cols - cwid - 1, y, v.col, v.row, hot ? K.bright : v.e.focus ? K.accent : K.line, hot);
+      y += drawCard(x, y, cwid - 1, v.e) + 1;
+    }
+    if (mine.length > keep.length) put(x, rows - 2, '+' + (mine.length - keep.length) + ' more on this side', K.dim);
+  }
+  drawPlaces();
+  drawMarkers(vis);
+  if (narrow) selectedBox();
+  return vis.length;
+}
+
+// ---------- design 2: CHART (land spelled in country names, gazetteer at right) ----------
+function renderChart() {
+  const pw = clamp(Math.floor(cols * 0.36), 38, 66), px = cols - pw;
+  setView(1, px - 2, 1, rows - 2);
+  drawGlobe('names');
+  if (S.geo) drawRivers(true, -1);
+  const vis = visibleEvents();
+  drawPlaces();
+  drawMarkers(vis);
+  fill(px, 1, pw, rows - 2, K.panel);
+  const rule = (y, t) => { put(px, y, '─'.repeat(pw), K.line); put(px + 2, y, ' ' + t + ' ', K.dim); };
+  const id = hoverId || centerCountry();
+  rule(1, id === hoverId && hoverId ? 'UNDER THE CURSOR' : 'AT THE CENTER');
+  if (id) {
+    const c = COUNTRIES[id], n = EVENTS.filter(e => e.cid === id).length;
+    put(px + 2, 3, cut(c.long.toUpperCase(), pw - 4), K.bright);
+    const rowsOut = [['capital', c.capital || 'none listed'], ['region', c.state ? COUNTRIES[c.pid].name + ' · ' + c.sub : c.sub + ', ' + c.cont],
+      ['people', c.pop ? popText(c.pop) : 'not listed'],
+      ['code', c.a3], ['events', n ? n + ' in the record' : 'none in the record']];
+    rowsOut.forEach((r, i) => { put(px + 2, 4 + i, r[0], K.dim); put(px + 11, 4 + i, cut(r[1], pw - 13), i === 4 && n ? K.accent : K.text); });
+  } else { put(px + 2, 3, 'OPEN WATER', K.bright); put(px + 2, 4, 'Move over land to read it.', K.dim); }
+  const list = vis.slice().sort((a, b) => b.pri - a.pri).map(v => v.e);
+  const sel = EVENTS.find(e => e.id === S.sel);
+  if (sel && !list.includes(sel)) list.unshift(sel);
+  rule(10, S.news ? 'IN VIEW · ' + vis.length : 'NEWS IS OFF · press e');
+  let y = 12, shownN = 0;
+  for (const e of list) {
+    const h = cardHeight(e, pw - 3);
+    if (y + h > rows - 2) break;
+    y += drawCard(px + 2, y, pw - 3, e) + 1; shownN++;
+  }
+  if (shownN < list.length) put(px + 2, rows - 2, '+' + (list.length - shownN) + ' more, zoom or turn to narrow', K.dim);
+  return vis.length;
+}
+
+// ---------- design 3: SCOPE (full-bleed braille globe, labels on the map) ----------
+function selectedBox() {
+  const e = EVENTS.find(v => v.id === S.sel); if (!e) return;
+  const w = Math.min(70, cols - 4), lines = wrap(e.sum, w - 4), src = wrap(e.src, w - 4);
+  const h = lines.length + src.length + 5, x = 2, y = rows - 1 - h;
+  box(x, y, w, h, CAT_NAMES[e.cat].toUpperCase() + ' · ' + e.status, K.dim, K.panel);
+  put(x + 2, y + 1, cut(e.title, w - 4), K.bright);
+  put(x + 2, y + 2, cut(when(e) + ' · ' + e.place, w - 4), K.cat + e.cat);
+  lines.forEach((l, i) => put(x + 2, y + 3 + i, l, K.text));
+  src.forEach((l, i) => put(x + 2, y + 3 + lines.length + i, l, K.dim));
+}
+function renderScope() {
+  setView(0, cols - 1, 1, rows - 2);
+  drawGlobeBraille();
+  if (S.geo) drawRivers(true, -1);
+  const vis = visibleEvents();
+  drawPlaces();
+  drawMarkers(vis);
+  const taken = new Uint8Array(cols * rows);
+  for (const v of vis) taken[v.row * cols + v.col] = 1;
+  for (const v of vis.slice().sort((a, b) => b.pri - a.pri)) {
+    const s = ' ' + cut(v.e.title, 36) + ' ';
+    for (const x of [v.col + 2, v.col - 1 - s.length]) {
+      if (x < 1 || x + s.length > cols - 1) continue;
+      let free = true;
+      for (let r = v.row - 1; r <= v.row + 1 && free; r++) { if (r < 1 || r > rows - 2) continue; for (let i = -1; i <= s.length; i++) if (taken[r * cols + x + i] && !(r === v.row && x + i === v.col)) { free = false; break; } }
+      if (!free) continue;
+      for (let i = 0; i < s.length; i++) taken[v.row * cols + x + i] = 1;
+      const hot = v.e.id === S.sel || v.e === hoverEvent;
+      put(x, v.row, s, hot || v.e.focus ? K.bright : K.text, hot ? K.selbg : K.panel);
+      put(x < v.col ? x + s.length : x - 1, v.row, '─', K.cat + v.e.cat);
+      hits.push({ x0: x, x1: x + s.length - 1, y0: v.row, y1: v.row, ev: v.e });
+      break;
+    }
+  }
+  // Country names on the land, for countries that carry events, wherever a row is still free.
+  for (let i = 1; i < COUNTRIES.length; i++) {
+    if (!EVC[i] && i !== hoverId) continue;
+    const c = COUNTRIES[i], p = project(c.label[1], c.label[0]);
+    if (p.z < 0.25) continue;
+    const s = ' ' + c.name.toUpperCase() + ' ', x = p.col - (s.length >> 1);
+    for (const r of [p.row, p.row + 1, p.row - 1]) {
+      if (r <= V.y0 || r >= V.y1 || x < 1 || x + s.length > cols - 1) continue;
+      let free = true;
+      for (let j = -1; j <= s.length && free; j++) if (taken[r * cols + x + j]) free = false;
+      if (!free) continue;
+      for (let j = 0; j < s.length; j++) taken[r * cols + x + j] = 1;
+      put(x, r, s, i === hoverId ? K.bright : K.dim, K.bg);
+      break;
+    }
+  }
+  selectedBox();
+  return vis.length;
+}
+
+// ---------- the chooser shown on first open ----------
+function chooserOverlay() {
+  const L = [['1', 'WIRE', 'Globe in the middle, events pulled out to both margins on leader lines.'],
+             ['2', 'CHART', 'Paper chart. Every country is filled with its own name; gazetteer at right.'],
+             ['3', 'SCOPE', 'Full-window braille globe at four times the detail; labels sit on the map.']];
+  const w = Math.min(92, cols - 4), x = Math.floor((cols - w) / 2), y = rows - 9;
+  box(x, y, w, 7, 'THREE MODES: PRESS 1, 2 OR 3. T CHANGES THE COLORS. ENTER CLOSES THIS.', K.dim, K.panel);
+  L.forEach((l, i) => {
+    put(x + 2, y + 2 + i, l[0] + ' ' + l[1].padEnd(6), i === S.design ? K.accent : K.bright);
+    put(x + 11, y + 2 + i, cut(l[2], w - 13), K.text);
+  });
+}
+
+// ---------- quiz ----------
+// Two ways to be asked: "name it" lights a feature and offers four names;
+// "find it" gives a name and waits for a click on the globe.
+const QCATS = [['country', 'c', 'countries'], ['capital', 'k', 'capitals'], ['lake', 'l', 'lakes'],
+               ['sea', 's', 'seas and oceans'], ['river', 'r', 'rivers'], ['range', 'm', 'mountain ranges'],
+               ['state', 'u', 'US states'], ['scap', 'p', 'state capitals'],
+               ['prov', 'v', 'Canadian provinces'], ['pcap', 'w', 'provincial capitals']];
+// Kinds that live inside one country: where a find-it question turns the globe, and which capitals it shows.
+const SUBVIEW = { state: [-97, 39, 2.4], scap: [-97, 39, 2.4], prov: [-98, 60, 1.7], pcap: [-98, 60, 1.7] };
+const placeList = cat => cat === 'capital' ? CAPS : STATECAPS.filter(c => c.parent === (cat === 'scap' ? 'USA' : 'CAN'));
+const QASK = { country: 'Which country is lit?', capital: 'Which capital is marked?', lake: 'Which lake is this?',
+               sea: 'Which body of water is this?', river: 'Which river is this?', range: 'Which mountain range is this?',
+               state: 'Which state is lit?', scap: 'Which state capital is marked?',
+               prov: 'Which province or territory is lit?', pcap: 'Which provincial capital is marked?' };
+const QKIND = { country: 'a country', capital: 'a capital city', lake: 'a lake', sea: 'a sea, gulf, strait or ocean', river: 'a river', range: 'a mountain range',
+                state: 'a US state', scap: 'a US state capital',
+                prov: 'a Canadian province or territory', pcap: 'a Canadian provincial or territorial capital' };
+const REGIONS = ['World', 'Africa', 'Asia', 'Europe', 'North America', 'South America', 'Oceania'];
+const Q = { on: false, type: store.get('qtype', 'name'), region: store.get('qregion', 0), stats: store.get('qstats', {}),
+            cats: store.get('qcats', { country: 1, capital: 1, lake: 0, sea: 0, river: 0, range: 0 }),
+            q: null, right: 0, total: 0, streak: 0, recent: [] };
+const POOL = {};
+function buildPools() {
+  const item = (f, key, extra) => Object.assign({ key, name: f.name, lat: f.lat, lon: f.lon, rad: f.rad, cont: f.cont, fact: '' }, extra);
+  POOL.country = COUNTRIES.map((c, i) => c && !c.state && c.a3 !== 'ATF' ? item(c, 'c:' + c.a3, { name: c.long, id: i,
+    fact: [c.capital ? 'capital ' + c.capital : '', c.sub, popText(c.pop)].filter(Boolean).join(' · ') }) : null).filter(Boolean);
+  const sub = a3 => COUNTRIES.map((c, i) => c && c.state && c.parent === a3 ? item(c, 'u:' + c.a3, { id: i, fact: 'capital ' + c.capital + ' · ' + c.sub }) : null).filter(Boolean);
+  POOL.state = sub('USA'); POOL.prov = sub('CAN');
+  for (const cat of ['scap', 'pcap']) POOL[cat] = placeList(cat).map(c => item(c, 'p:' + c.name, { rad: cat === 'scap' ? 5 : 9, city: c, fact: 'capital of ' + c.country }));
+  POOL.capital = CAPS.map(c => item(c, 'k:' + c.name, { rad: 8, city: c, fact: 'capital of ' + c.country }));
+  const water = lake => FW.map((f, i) => f && !f.gone && (f.kind === 'lake') === lake ? item(f, (lake ? 'l:' : 's:') + f.name, { id: i }) : null).filter(Boolean);
+  POOL.lake = water(true); POOL.sea = water(false);
+  POOL.range = FR.map((f, i) => f && !f.gone ? item(f, 'm:' + f.name, { id: i }) : null).filter(Boolean);
+  POOL.river = RIVERS.map((f, i) => item(f, 'r:' + f.name, { ri: i }));
+}
+function qPool(cat) { return Q.region ? POOL[cat].filter(i => i.cont === REGIONS[Q.region]) : POOL[cat]; }
+function apart(a, b) {
+  const la = a.lat * RAD, lb = b.lat * RAD;
+  return Math.acos(clamp(Math.sin(la) * Math.sin(lb) + Math.cos(la) * Math.cos(lb) * Math.cos((a.lon - b.lon) * RAD), -1, 1));
+}
+function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+function weighted(list, w) {
+  let sum = 0; const ws = list.map(x => { const v = w(x); sum += v; return v; });
+  let r = Math.random() * sum;
+  for (let i = 0; i < list.length; i++) { r -= ws[i]; if (r <= 0) return list[i]; }
+  return list[list.length - 1];
+}
+function setLit(q) {
+  HI.country = HI.water = HI.relief = 0; HI.river = -1; HI.city = null;
+  if (!q) return;
+  const it = q.item;
+  if (q.cat === 'country' || q.cat === 'state' || q.cat === 'prov') HI.country = it.id; else if (q.cat === 'lake' || q.cat === 'sea') HI.water = it.id;
+  else if (q.cat === 'range') HI.relief = it.id; else if (q.cat === 'river') HI.river = it.ri; else HI.city = it.city;
+}
+function frameItem(it) {
+  S.fly = { lon: it.lon, lat: clamp(it.lat, -80, 80) };
+  S.zoom = clamp(0.35 / Math.sin(clamp(it.rad, 1.5, 89) * RAD), 0.9, 4.5);
+}
+function nextQuestion() {
+  setLit(null); Q.q = null; dirty = true;
+  const cats = QCATS.map(c => c[0]).filter(c => Q.cats[c] && qPool(c).length >= 4);
+  if (!cats.length) return;
+  const cat = weighted(cats, c => Math.sqrt(qPool(c).length)), pool = qPool(cat);
+  // Missed items come back more often; the last dozen asked sit out.
+  const item = weighted(pool, i => {
+    if (Q.recent.includes(i.key) && pool.length > 16) return 0.0001;
+    const st = Q.stats[i.key] || [0, 0];
+    return clamp(1 + 2 * st[1] - 0.5 * st[0], 0.25, 6);
+  });
+  const q = { cat, item, answered: false, right: false, picked: -1, said: '' };
+  if (Q.type === 'name') {
+    // Wrong answers come from the neighborhood, which is where the confusion is.
+    const near = pool.filter(i => i !== item && i.name !== item.name).sort((a, b) => apart(a, item) - apart(b, item)).slice(0, 8);
+    const names = [];
+    for (const i of shuffle(near)) if (names.length < 3 && !names.includes(i.name)) names.push(i.name);
+    q.choices = shuffle(names.concat(item.name)); q.correct = q.choices.indexOf(item.name);
+    setLit(q); frameItem(item);
+  } else if (SUBVIEW[cat]) {                            // bring the country into view, not the answer
+    S.fly = { lon: SUBVIEW[cat][0], lat: SUBVIEW[cat][1] }; S.zoom = Math.max(S.zoom, SUBVIEW[cat][2]);
+  }
+  Q.q = q;
+}
+function grade(right, said, picked) {
+  const q = Q.q; q.answered = true; q.right = right; q.said = said || ''; q.picked = picked === undefined ? -1 : picked;
+  Q.total++; if (right) { Q.right++; Q.streak++; } else Q.streak = 0;
+  const st = Q.stats[q.item.key] || (Q.stats[q.item.key] = [0, 0]); st[right ? 0 : 1]++;
+  store.set('qstats', Q.stats);
+  Q.recent.push(q.item.key); if (Q.recent.length > 12) Q.recent.shift();
+  setLit(q);
+  if (Q.type === 'find' && !right) frameItem(q.item);
+  dirty = true;
+}
+function findClick(col, row) {
+  const q = Q.q, it = q.item;
+  if (!cellGeo(col, row)) return;                       // off the globe: not an answer
+  const cId = oId, cW = oW, cR = oR;
+  const near = (dx, dy, test) => {
+    for (let r = row - dy; r <= row + dy; r++) for (let c = col - dx; c <= col + dx; c++)
+      if (c >= 0 && c < cols && r >= 0 && r < rows && cellGeo(c, r) && test(c, r)) return true;
+    return false;
+  };
+  const land = cId ? COUNTRIES[cId].long : 'open water';
+  let ok = false, said = '';
+  if (q.cat === 'country' || q.cat === 'state' || q.cat === 'prov') { ok = near(1, 0, () => oId === it.id); said = land; }
+  else if (q.cat === 'lake' || q.cat === 'sea') { ok = near(2, 1, () => !oId && oW === it.id); said = !cId && cW ? FW[cW].name : land; }
+  else if (q.cat === 'range') { ok = near(1, 1, () => oId && oR === it.id); said = cId && cR ? FR[cR].name : land; }
+  else if (q.cat === 'river') {
+    let hit = 0;
+    ok = near(2, 1, (c, r) => { const v = G_riv[r * cols + c]; if (v && !hit) hit = v; return v === it.ri + 1; });
+    said = hit ? 'the ' + RIVERS[hit - 1].name : 'no river';
+  } else {
+    let best = null, bd = 1e9;
+    for (const c of placeList(q.cat)) {
+      const p = project(c.lat, c.lon); if (p.z <= 0) continue;
+      const d = Math.abs(p.col - col) + 2 * Math.abs(p.row - row);
+      if (Math.abs(p.col - col) <= 2 && Math.abs(p.row - row) <= 1 && (d < bd || c === it.city)) { best = c; bd = c === it.city ? -1 : d; }
+    }
+    ok = best === it.city; said = best ? best.name : 'no capital';
+  }
+  grade(ok, ok ? '' : said);
+}
+function quizStart() { Q.on = true; S.sel = null; S.help = false; S.chooser = false; Q.right = Q.total = Q.streak = 0; nextQuestion(); }
+function quizLeave() { Q.on = false; Q.q = null; setLit(null); S.zoom = 1; dirty = true; }
+function quizSet(k, v) { Q[k] = v; store.set('q' + k, v); nextQuestion(); }
+function quizToggle(cat) { Q.cats[cat] = Q.cats[cat] ? 0 : 1; store.set('qcats', Q.cats); nextQuestion(); }
+function quizKey(k) {
+  const q = Q.q, cat = QCATS.find(c => c[1] === k);
+  if (k >= '1' && k <= '4') { if (q && !q.answered && Q.type === 'name' && +k <= q.choices.length) grade(+k - 1 === q.correct, '', +k - 1); }
+  else if (k === 'Enter' || k === ' ' || k === 'n') { if (!q || q.answered) nextQuestion(); }
+  else if (cat) quizToggle(cat[0]);
+  else if (k === 'x') quizSet('type', Q.type === 'name' ? 'find' : 'name');
+  else if (k === 'o' || k === 'O') quizSet('region', (Q.region + (k === 'o' ? 1 : REGIONS.length - 1)) % REGIONS.length);
+  else if (k === 'q' || k === 'Escape') quizLeave();
+  else return 't T 0 + = - _ [ ] ? h'.split(' ').includes(k) || k.startsWith('Arrow') ? false : true;   // swallow the news keys
+  return true;
+}
+function quizBox() {
+  const q = Q.q, w = Math.min(68, cols - 4), x = 2, h = 20, y = rows - 1 - h;
+  box(x, y, w, h, 'QUIZ · ' + (Q.type === 'name' ? 'name it' : 'find it'), K.dim, K.panel);
+  hits.push({ x0: x, x1: x + w - 1, y0: y, y1: y + h - 1, fn: () => {} });   // clicks on the box are not answers
+  const score = ' ' + Q.right + ' of ' + Q.total + (Q.streak > 1 ? ' · streak ' + Q.streak : '') + ' ';
+  put(x + w - 2 - score.length, y, score, K.text);
+  const link = (lx, ly, s, fg, fn) => { put(lx, ly, s, fg); hits.push({ x0: lx, x1: lx + s.length - 1, y0: ly, y1: ly, fn }); };
+  let r = y + 2;
+  if (!q) {
+    wrap('Nothing to ask. Turn on at least one kind below that has four or more entries in ' + REGIONS[Q.region] + '.', w - 4).forEach((l, i) => put(x + 2, r + i, l, K.text));
+  } else if (Q.type === 'name') {
+    put(x + 2, r, QASK[q.cat], K.bright);
+    q.choices.forEach((c, i) => {
+      const done = q.answered, good = done && i === q.correct, bad = done && i === q.picked && !q.right;
+      link(x + 2, r + 2 + i, (good ? '✓' : bad ? '✗' : ' ') + ' ' + (i + 1) + '  ' + cut(c, w - 10), good ? K.accent : bad ? K.cat : done ? K.dim : K.text,
+        () => { if (!q.answered) grade(i === q.correct, '', i); });
+    });
+  } else {
+    put(x + 2, r, 'Find it and click:', K.text);
+    put(x + 2, r + 2, cut(q.item.name, w - 4), K.bright);
+    put(x + 2, r + 3, QKIND[q.cat] + (Q.region ? ', ' + REGIONS[Q.region] : ''), K.dim);
+  }
+  if (q && q.answered) {
+    const it = q.item;
+    const head = q.right ? '✓ Right.' : '✗ ' + (Q.type === 'find' ? 'That was ' + q.said + '. It is lit now.' : 'It is ' + it.name + '.');
+    put(x + 2, r + 7, cut(head, w - 4), q.right ? K.accent : K.cat);
+    if (it.fact) put(x + 2, r + 8, cut(it.name + ' · ' + it.fact, w - 4), K.text);
+    link(x + 2, r + 9, 'enter  next question', K.dim, () => nextQuestion());
+  }
+  put(x, y + 12, '├' + '─'.repeat(w - 2) + '┤', K.dim); put(x + 2, y + 12, ' ask about ', K.dim);
+  QCATS.forEach((c, i) => {
+    const n = qPool(c[0]).length;
+    link(x + 2 + (i % 2) * Math.floor((w - 4) / 2), y + 13 + (i >> 1), (Q.cats[c[0]] ? '[x] ' : '[ ] ') + c[1] + '  ' + c[2] + ' ' + n,
+      Q.cats[c[0]] ? (n >= 4 ? K.text : K.dim) : K.dim, () => quizToggle(c[0]));
+  });
+  let lx = x + 2;
+  for (const [s, fn] of [['x  ' + (Q.type === 'name' ? 'switch to find it' : 'switch to name it'), () => quizSet('type', Q.type === 'name' ? 'find' : 'name')],
+                         ['o  region: ' + REGIONS[Q.region], () => quizSet('region', (Q.region + 1) % REGIONS.length)], ['q  leave', () => quizLeave()]]) {
+    link(lx, y + 18, s, K.dim, fn); lx += s.length + 3;
+  }
+}
+function renderQuiz() {
+  const q = Q.q, find = Q.type === 'find';
+  setView(0, cols - 1, 1, rows - 2);
+  showRanges = !!q && q.cat === 'range' && find;
+  // CHART's land spells country names, which would give the answers away.
+  if (S.design === 2) drawGlobeBraille(); else drawGlobe('tint');
+  if (q && q.cat === 'river') drawRivers(find, HI.river);
+  if (q && find && (q.cat === 'capital' || q.cat === 'scap' || q.cat === 'pcap')) drawCities(placeList(q.cat));
+  if (HI.city) {
+    const p = project(HI.city.lat, HI.city.lon);
+    if (p.z > 0) { put(p.col, p.row, '◎', K.bright, K.selbg); G_kind[p.row * cols + p.col] = 2; }
+  }
+  if (q && q.answered) {
+    const p = project(q.item.lat, q.item.lon), s = ' ' + q.item.name + ' ';
+    if (p.z > 0) put(clamp(p.col + 2, 0, cols - s.length), p.row, s, K.bright, K.selbg);
+  }
+  quizBox();
+}
+
+function render() {
+  TH = THEMES[S.theme >= 0 && S.theme < THEMES.length ? S.theme : DESIGNS[S.design].theme]; P = TH.pal;
+  document.body.style.background = P[K.bg];
+  clear();
+  if (!LAND) { put(2, 1, 'event-view: reading the map…', K.text); flush(); return; }
+  showRanges = S.geo;
+  showStates = Q.on ? !!Q.q && !!SUBVIEW[Q.q.cat] : S.states;
+  const n = Q.on ? (renderQuiz(), 0) : [renderWire, renderChart, renderScope][S.design]();
+  topBar(n); bottomBar(); if (!Q.on) tooltip();
+  if (S.chooser) chooserOverlay();
+  if (S.help) helpOverlay();
+  flush();
+}
+
+// ---------- input ----------
+function setDesign(i) { S.design = i; dirty = true; }
+function setTheme(i) { S.theme = i; store.set('theme', i); dirty = true; }
+function nextTheme(dir) { setTheme((THEMES.indexOf(TH) + dir + THEMES.length) % THEMES.length); }
+function zoomBy(f) { S.zoom = clamp(S.zoom * f, 0.6, 7); holdUntil = performance.now() + 4000; dirty = true; }
+function select(e) {
+  S.sel = e ? e.id : null;
+  if (e) S.fly = { lon: e.lon, lat: clamp(e.lat, -65, 65) };
+  dirty = true;
+}
+function step(dir) {
+  const list = EVENTS.filter(shown); if (!list.length) return;
+  const i = list.findIndex(e => e.id === S.sel);
+  select(list[(i + dir + list.length) % list.length]);
+}
+function hitAt(col, row) { for (let i = hits.length - 1; i >= 0; i--) { const h = hits[i]; if (col >= h.x0 && col <= h.x1 && row >= h.y0 && row <= h.y1) return h; } return null; }
+function hover(ev) {
+  mouse.col = Math.floor(ev.clientX / cw); mouse.row = Math.floor(ev.clientY / ch);
+  const h = hitAt(mouse.col, mouse.row);
+  hoverEvent = h && h.ev ? h.ev : null;
+  hoverId = 0; hoverCity = null; hoverW = hoverR = hoverRiv = 0;
+  if (Q.on) { canvas.classList.toggle('point', !!h && !!h.fn && h.y0 === h.y1); dirty = true; return; }
+  const overMap = mouse.col >= V.x0 && mouse.col <= V.x1 && mouse.row >= V.y0 && mouse.row <= V.y1;
+  if (!h && LAND && overMap && cellGeo(mouse.col, mouse.row)) {
+    hoverId = oId; hoverW = oId ? 0 : oW; hoverR = oId ? oR : 0;
+    for (let c = mouse.col - 1; c <= mouse.col + 1 && !hoverRiv; c++) if (c >= 0 && c < cols) hoverRiv = G_riv[mouse.row * cols + c];
+    for (const c of (S.cities ? CAPS : []).concat(S.scaps ? STATECAPS : [])) { const p = project(c.lat, c.lon); if (p.z > 0.1 && p.row === mouse.row && Math.abs(p.col - mouse.col) <= 1) { hoverCity = c; break; } }
+  }
+  canvas.classList.toggle('point', !!h);
+  dirty = true;
+}
+canvas.addEventListener('pointerdown', ev => { mouse.down = true; mouse.moved = false; mouse.x = ev.clientX; mouse.y = ev.clientY; mouse.onHit = !!hitAt(Math.floor(ev.clientX / cw), Math.floor(ev.clientY / ch)); canvas.setPointerCapture(ev.pointerId); });
+canvas.addEventListener('pointermove', ev => {
+  if (mouse.down && !mouse.onHit) {
+    const dx = ev.clientX - mouse.x, dy = ev.clientY - mouse.y;
+    if (Math.abs(dx) + Math.abs(dy) > 2 || mouse.moved) {
+      mouse.moved = true; canvas.classList.add('dragging');
+      const k = DEG / (V.Rr * ch);
+      S.lon -= dx * k; S.lat = clamp(S.lat + dy * k, -85, 85); S.fly = null;
+      mouse.x = ev.clientX; mouse.y = ev.clientY; holdUntil = performance.now() + 4000; dirty = true;
+    }
+    return;
+  }
+  hover(ev);
+});
+canvas.addEventListener('pointerup', ev => {
+  canvas.classList.remove('dragging');
+  if (mouse.down && !mouse.moved) {
+    const col = Math.floor(ev.clientX / cw), row = Math.floor(ev.clientY / ch), h = hitAt(col, row);
+    if (h && h.fn) h.fn();
+    else if (Q.on) { if (Q.q && !Q.q.answered && Q.type === 'find') findClick(col, row); }
+    else if (h && h.ev) select(h.ev.id === S.sel && !h.cycle ? null : h.ev); else select(null);
+  }
+  mouse.down = false; hover(ev);
+});
+canvas.addEventListener('pointerleave', () => { mouse.col = -1; hoverId = 0; hoverEvent = null; hoverCity = null; hoverW = hoverR = hoverRiv = 0; dirty = true; });
+canvas.addEventListener('wheel', ev => { ev.preventDefault(); zoomBy(Math.exp(-ev.deltaY * 0.0015)); }, { passive: false });
+window.addEventListener('keydown', ev => {
+  if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+  const k = ev.key; let used = true;
+  if (Q.on && quizKey(k)) { ev.preventDefault(); dirty = true; return; }
+  if (k === '1' || k === '2' || k === '3') setDesign(+k - 1);
+  else if (k === 'q') quizStart();
+  else if (k === 'e') setNews(!S.news);
+  else if (k === 'g') S.geo = !S.geo;
+  else if (k === 's') { S.states = !S.states; store.set('states', S.states); }
+  else if (k === 'C') { S.scaps = !S.scaps; store.set('scaps', S.scaps); }
+  else if (k === ' ') S.spin = !S.spin;
+  else if (k === 'n' || k === 'j') step(1);
+  else if (k === 'p' || k === 'k') step(-1);
+  else if (k === 'f') { S.filter = S.filter >= CAT_NAMES.length - 1 ? -1 : S.filter + 1; markCountries(); }
+  else if (k === 'F') { S.filter = -1; markCountries(); }
+  else if (k === 'c') S.cities = !S.cities;
+  else if (k === 't') nextTheme(1);
+  else if (k === 'T') nextTheme(-1);
+  else if (k === '0') setTheme(-1);
+  else if (k === '?' || k === 'h') S.help = !S.help;
+  else if (k === 'Escape') { if (S.help || S.chooser) { S.help = false; S.chooser = false; } else select(null); }
+  else if (k === 'Enter') S.chooser = false;
+  else if (k === '+' || k === '=') zoomBy(1.25);
+  else if (k === '-' || k === '_') zoomBy(1 / 1.25);
+  else if (k === '[' || k === ']') { S.fs = clamp(S.fs + (k === ']' ? 1 : -1), 8, 24); store.set('fs', S.fs); resize(); }
+  else if (k.startsWith('Arrow')) {
+    const d = 8 / S.zoom; S.fly = null; holdUntil = performance.now() + 4000;
+    if (k === 'ArrowLeft') S.lon -= d; else if (k === 'ArrowRight') S.lon += d;
+    else if (k === 'ArrowUp') S.lat = clamp(S.lat + d, -85, 85); else S.lat = clamp(S.lat - d, -85, 85);
+  } else used = false;
+  if (used) { ev.preventDefault(); dirty = true; }
+});
+window.addEventListener('resize', resize);
+
+// ---------- data ----------
+function markCountries() { EVC.fill(0); for (const e of EVENTS) if (shown(e) && e.cid) EVC[e.cid] = 1; }
+function loadEvents(text) {
+  if (text === eventsRaw) return; eventsRaw = text;
+  const d = JSON.parse(text), list = Array.isArray(d) ? d : d.events || [];
+  const oldFocus = FOCUS.join(',');
+  FOCUS = Array.isArray(d.focus) ? d.focus : []; UPDATED = d.updated || '';
+  EVENTS = list.filter(e => typeof e.lat === 'number' && typeof e.lon === 'number').map(e => Object.assign({}, e, {
+    cat: Math.max(0, CAT_NAMES.indexOf(e.cat)), cid: byCode[e.iso] || 0, focus: FOCUS.includes(e.id),
+    sum: e.sum || '', src: e.src || '', tag: e.tag || 'unmarked', place: e.place || '' }));
+  EVENTS.sort((a, b) => a.date < b.date ? 1 : a.date > b.date ? -1 : 0);
+  markCountries();
+  if (FOCUS.length && FOCUS.join(',') !== oldFocus) { const e = EVENTS.find(v => v.id === FOCUS[0]); if (e) select(e); }
+  dirty = true;
+}
+async function pollEvents() {
+  try { const r = await fetch('events.json', { cache: 'no-store' }); if (r.ok) loadEvents(await r.text()); } catch (e) {}
+}
+async function boot() {
+  resize(); render();
+  const bin = f => fetch(f).then(r => r.arrayBuffer()), json = f => fetch(f).then(r => r.json());
+  const [land, meta, water, relief, feats, states, st] = await Promise.all([bin('land.bin'), json('countries.json'), bin('water.bin'),
+    bin('relief.bin'), json('features.json'), bin('states.bin'), json('states.json')]);
+  FW = feats.water; FR = feats.relief; RIVERS = feats.rivers;
+  FW.forEach((f, i) => { if (f && f.kind === 'lake') ISLAKE[i] = 1; });
+  WATER = new Uint8Array(water); RELIEF = new Uint8Array(relief);
+  MW = meta.w; MH = meta.h; COUNTRIES = meta.countries; CITIES = meta.cities;
+  SOFF = COUNTRIES.length - 1; STATES = new Uint8Array(states);
+  for (const s of st.states.slice(1)) COUNTRIES.push(Object.assign({ long: s.name, a3: s.parent.slice(0, 2) + '-' + s.postal, iso: '-99', cont: 'North America', pop: 0, state: true }, s));
+  STATECAPS = st.capitals.map(c => Object.assign({ cap: true, cont: 'North America' }, c));
+  CAPS = CITIES.filter(c => c.cap);
+  COUNTRIES.forEach((c, i) => {
+    if (!c) return;
+    NAMEU[i] = c.name.toUpperCase() + '·'; NAMEL[i] = c.name.toLowerCase() + '·';
+    byCode[c.a3] = i; if (c.iso && c.iso !== '-99') byCode[c.iso] = i;
+  });
+  COUNTRIES.forEach(c => { if (c && c.state) c.pid = byCode[c.parent]; });
+  LAND = new Uint8Array(land);
+  buildPools();
+  await pollEvents();
+  if (HASH[1]) { const e = EVENTS.find(v => v.id === HASH[1]); if (e) { select(e); S.lon = e.lon; S.lat = clamp(e.lat, -65, 65); } }
+  if (+HASH[2]) S.zoom = clamp(+HASH[2], 0.6, 7);
+  if (HASH[3] && +HASH[3] >= 0) S.theme = +HASH[3];
+  if (HASH[0] === 'quiz') {              // #quiz[:kinds[:name|find[:answered]]], e.g. #quiz:river,lake:find
+    if (HASH[1]) QCATS.forEach(c => Q.cats[c[0]] = HASH[1].split(',').includes(c[0]) ? 1 : 0);
+    if (HASH[2]) Q.type = HASH[2];
+    quizStart();
+    if (HASH[3] && Q.q) { if (Q.type === 'name') grade(true, '', Q.q.correct); else grade(false, 'somewhere else'); }
+  }
+  if (HASH[0] === 'geo') S.geo = true;
+  if (HASH[0] === 'states') { S.states = S.scaps = true; S.news = false; markCountries(); S.lon = -97; S.lat = 50; }
+  setInterval(pollEvents, 15000);
+  dirty = true;
+}
+
+// ---------- loop ----------
+let last = performance.now(), lastDraw = 0, holdUntil = 0;
+function tick(t) {
+  requestAnimationFrame(tick);
+  const dt = Math.min(0.1, (t - last) / 1000); last = t;
+  let moving = false;
+  if (S.fly) {
+    const dl = ((S.fly.lon - S.lon + 540) % 360) - 180, da = S.fly.lat - S.lat, f = Math.min(1, dt * 4);
+    S.lon += dl * f; S.lat += da * f; moving = true;
+    if (Math.abs(dl) < 0.05 && Math.abs(da) < 0.05) S.fly = null;
+  } else if (S.spin && !S.sel && !mouse.down && !S.help && !Q.on && t > holdUntil) {
+    S.lon += dt * 1.5; moving = true;       // one turn in four minutes, the surface drifting west to east
+  }
+  S.lon = ((S.lon + 540) % 360) - 180;
+  if (!moving && t - lastDraw < 400 && !dirty) return;   // while turning, draw every frame the browser gives
+  if (!moving && !dirty && !FOCUS.length && t - lastDraw < 20000) return;
+  lastDraw = t; dirty = false; render();
+}
+boot(); requestAnimationFrame(tick);
+</script>
+</body>
+</html>

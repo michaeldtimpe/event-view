@@ -1,0 +1,55 @@
+{
+ "updated": "2026-10-01",
+ "focus": [],
+ "events": [
+  {
+   "id": "us-midterms",
+   "title": "US midterm elections",
+   "date": "2026-11-03",
+   "status": "upcoming",
+   "cat": "politics",
+   "place": "Washington, DC, United States",
+   "lat": 38.89,
+   "lon": -77.01,
+   "iso": "USA",
+   "also": [],
+   "sum": "Example entry. All 435 House seats and about a third of the Senate are on the ballot.",
+   "tag": "example",
+   "src": "events.example.json",
+   "region": "us"
+  },
+  {
+   "id": "brazil-first-round",
+   "title": "Brazil general election, first round",
+   "date": "2026-10-04",
+   "status": "upcoming",
+   "cat": "politics",
+   "place": "Brasília, Brazil",
+   "lat": -15.79,
+   "lon": -47.88,
+   "iso": "BRA",
+   "also": [],
+   "sum": "Example entry. A runoff follows on 25 October if no presidential candidate wins a majority.",
+   "tag": "example",
+   "src": "events.example.json",
+   "region": "latin-america"
+  },
+  {
+   "id": "cop31-antalya",
+   "title": "COP31 in Antalya",
+   "date": "2026-11-09",
+   "end": "2026-11-20",
+   "status": "upcoming",
+   "cat": "climate",
+   "place": "Antalya, Turkey",
+   "lat": 36.9,
+   "lon": 30.7,
+   "iso": "TUR",
+   "also": ["AUS"],
+   "sum": "Example entry. The UN climate conference, hosted by Turkey with Australia leading the negotiations.",
+   "tag": "example",
+   "src": "events.example.json",
+   "region": "middle-east"
+  }
+ ]
+}
